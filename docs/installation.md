@@ -9,8 +9,8 @@ pip install multi-agent-generator
 ## Development Installation
 
 ```bash
-git clone https://github.com/aakriti1318/multi-agent-generator.git
-cd multi-agent-generator
+git clone https://github.com/Utsav280805/Prompt2Agent.git
+cd Prompt2Agent
 pip install -e ".[dev]"
 ```
 

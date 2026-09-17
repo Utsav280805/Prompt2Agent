@@ -8,6 +8,8 @@ from .test_generator import (
     TestGenerator,
     TestCase,
     TestSuite,
+    TestBundle,
+    TestType,
     generate_tests,
 )
 
@@ -28,6 +30,8 @@ __all__ = [
     'TestGenerator',
     'TestCase',
     'TestSuite',
+    'TestBundle',
+    'TestType',
     'generate_tests',
     'AgentEvaluator',
     'EvaluationResult',

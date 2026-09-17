@@ -1,6 +1,6 @@
 # These are supported funding model platforms
 
-github: [aakriti1318]
+github:
 patreon:
 open_collective:
 ko_fi:
@@ -10,8 +10,6 @@ liberapay:
 issuehunt:
 lfx_crowdfunding:
 polar:
-buy_me_a_coffee: aggarwalak
+buy_me_a_coffee:
 thanks_dev:
 custom:
-  - https://medium.com/@aakriti-aggarwal
-  - https://www.linkedin.com/in/aakritiaggarwal13/

@@ -2,141 +2,203 @@
 """
 Generator for CrewAI Flow code.
 """
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
 
-def create_crewai_flow_code(config: Dict[str, Any]) -> str:
+from ._common import (
+    collect_tools,
+    header_comment,
+    llm_snippet_for,
+    render_llm_setup,
+    sanitize_identifier,
+    tool_class_name,
+)
+
+
+def create_crewai_flow_code(
+    config: Dict[str, Any],
+    provider: str = "openai",
+    model: Optional[str] = None,
+) -> str:
     """
     Generate CrewAI Flow code from a configuration.
-    
-    This function creates event-driven workflow code using the CrewAI Flow framework,
-    with proper transitions between different workflow steps.
-    
+
+    Creates event-driven workflow code using the CrewAI Flow framework, with
+    transitions between workflow steps.
+
     Args:
-        config: Dictionary containing agents, tasks, and workflow configuration
-        
+        config: Agents, tasks and workflow configuration.
+        provider: LLM provider backing the generated agents.
+        model: Optional explicit model id overriding the provider default.
+
     Returns:
-        Generated Python code as a string
+        Generated Python code as a string.
     """
-    # Start with the basic imports
-    code = "from crewai import Agent, Task, Crew\n"
-    code += "from crewai.flow.flow import Flow, listen, start\n"
-    code += "from typing import Dict, List, Any\n"
-    code += "from pydantic import BaseModel, Field\n\n"
-    
-    # Define state model for the flow
+    agents = config.get("agents") or []
+    tasks = config.get("tasks") or []
+
+    snippet = llm_snippet_for("crewai-flow", provider, model, config)
+
+    code = header_comment("CrewAI Flow", provider, snippet.model, "crewai-flow")
+
+    tool_names = collect_tools(agents)
+
+    imports: List[str] = [
+        "from crewai import Agent, Crew, Task",
+        "from crewai.flow.flow import Flow, listen, start",
+    ]
+    if tool_names:
+        imports.append("from crewai.tools import BaseTool")
+    imports += [
+        "from typing import Any, Dict, List",
+        "from pydantic import BaseModel, Field",
+    ]
+    for line in snippet.imports:
+        if line not in imports:
+            imports.append(line)
+    code += "\n".join(imports) + "\n\n\n"
+
+    # LLM
+    code += "# Shared LLM\n"
+    code += render_llm_setup(snippet) + "\n\n\n"
+
+    # Flow state
     code += "# Define flow state\n"
     code += "class AgentState(BaseModel):\n"
-    code += "    query: str = Field(default=\"\")\n"
+    code += '    query: str = Field(default="")\n'
     code += "    results: Dict[str, Any] = Field(default_factory=dict)\n"
-    code += "    current_step: str = Field(default=\"\")\n\n"
-    
-    # Generate Agent configurations
-    for agent in config["agents"]:
-        code += f"# Agent: {agent['name']}\n"
-        code += f"agent_{agent['name']} = Agent(\n"
-        code += f"    role='{agent['role']}',\n"
-        code += f"    goal='{agent['goal']}',\n"
-        code += f"    backstory='{agent['backstory']}',\n"
-        code += f"    verbose={agent['verbose']},\n"
-        code += f"    allow_delegation={agent['allow_delegation']},\n"
-        code += f"    tools={agent['tools']}\n"
+    code += '    current_step: str = Field(default="")\n\n\n'
+
+    # Tools (CrewAI validates tools as objects, not name strings)
+    tool_instances: Dict[str, str] = {}
+    if tool_names:
+        code += "# Tool stubs - replace the bodies with real implementations\n"
+        for tool in tool_names:
+            cls = tool_class_name(tool)
+            tool_instances[tool] = f"{cls}()"
+            code += f"class {cls}(BaseTool):\n"
+            code += f'    name: str = "{tool}"\n'
+            code += f'    description: str = "Tool for {tool} operations"\n\n'
+            code += "    def _run(self, query: str) -> str:\n"
+            code += "        # TODO: implement actual functionality\n"
+            code += f'        return f"Result from {tool}: {{query}}"\n\n\n'
+
+        code += "TOOLS = {\n"
+        for tool in tool_names:
+            code += f'    "{tool}": {tool_instances[tool]},\n'
+        code += "}\n\n\n"
+
+    # Agents. Names are sanitised: an LLM-supplied name like "Research Analyst" used to
+    # be interpolated straight into an identifier, producing code that would not parse.
+    agent_name_to_var: Dict[str, str] = {}
+    for i, agent in enumerate(agents):
+        agent_var = f"agent_{sanitize_identifier(agent.get('name', f'agent_{i}'), 'agent')}"
+        agent_name_to_var[agent.get("name")] = agent_var
+
+        agent_tools = [t for t in (agent.get("tools") or []) if isinstance(t, str)]
+        tools_expr = (
+            "[" + ", ".join(f'TOOLS["{t}"]' for t in agent_tools if t in tool_instances) + "]"
+        )
+
+        code += f"# Agent: {agent.get('name', f'agent_{i}')}\n"
+        code += f"{agent_var} = Agent(\n"
+        code += f"    role={agent.get('role', 'Specialist')!r},\n"
+        code += f"    goal={agent.get('goal', 'Complete assigned tasks')!r},\n"
+        code += f"    backstory={agent.get('backstory', '')!r},\n"
+        code += f"    verbose={bool(agent.get('verbose', True))},\n"
+        code += f"    allow_delegation={bool(agent.get('allow_delegation', False))},\n"
+        code += f"    tools={tools_expr},\n"
+        code += "    llm=llm,\n"
         code += ")\n\n"
 
-    # Generate Task configurations
-    for task in config["tasks"]:
-        code += f"# Task: {task['name']}\n"
-        code += f"task_{task['name']} = Task(\n"
-        code += f"    description='{task['description']}',\n"
-        code += f"    agent=agent_{task['agent']},\n"
-        code += f"    expected_output='{task['expected_output']}'\n"
+    # Tasks
+    task_vars: List[str] = []
+    task_steps: List[Dict[str, str]] = []
+    for i, task in enumerate(tasks):
+        raw_name = task.get("name", f"task_{i}")
+        safe = sanitize_identifier(raw_name, "task")
+        task_var = f"task_{safe}"
+        task_vars.append(task_var)
+        task_steps.append({"raw": raw_name, "safe": safe, "var": task_var})
+
+        code += f"# Task: {raw_name}\n"
+        code += f"{task_var} = Task(\n"
+        code += f"    description={task.get('description', '')!r},\n"
+
+        agent_name = task.get("agent")
+        if agent_name and agent_name in agent_name_to_var:
+            code += f"    agent={agent_name_to_var[agent_name]},\n"
+        elif agent_name_to_var:
+            fallback = agents[0].get("name")
+            code += f"    # Auto-assigned to: {fallback}\n"
+            code += f"    agent={agent_name_to_var[fallback]},\n"
+
+        code += f"    expected_output={task.get('expected_output', 'A useful result')!r},\n"
         code += ")\n\n"
 
-    # Generate Crew configuration
-    code += "# Crew Configuration\n"
+    # Crew
+    code += "# Crew configuration\n"
     code += "crew = Crew(\n"
-    code += "    agents=[" + ", ".join(f"agent_{a['name']}" for a in config["agents"]) + "],\n"
-    code += "    tasks=[" + ", ".join(f"task_{t['name']}" for t in config["tasks"]) + "],\n"
-    code += "    verbose=True\n"
-    code += ")\n\n"
-    
-    # Create Flow class
+    code += "    agents=[" + ", ".join(agent_name_to_var.values()) + "],\n"
+    code += "    tasks=[" + ", ".join(task_vars) + "],\n"
+    code += "    verbose=True,\n"
+    code += ")\n\n\n"
+
+    # Flow
     code += "# Define CrewAI Flow\n"
     code += "class WorkflowFlow(Flow[AgentState]):\n"
-    
-    # Define initial step with @start decorator
     code += "    @start()\n"
     code += "    def initial_input(self):\n"
-    code += "        \"\"\"Process the initial user query.\"\"\"\n"
-    code += "        print(\"Starting workflow...\")\n"
-    
-    # Set the first task as the current step
-    first_task = config["tasks"][0]["name"] if config["tasks"] else "completed"
-    code += f"        self.state.current_step = \"{first_task}\"\n"
+    code += '        """Process the initial user query."""\n'
+    code += '        print("Starting workflow...")\n'
+    first_step = task_steps[0]["raw"] if task_steps else "completed"
+    code += f'        self.state.current_step = "{first_step}"\n'
     code += "        return self.state\n\n"
-    
-    # Add task steps with @listen decorators
-    tasks = config["tasks"]
+
     previous_step = "initial_input"
-    
-    for i, task in enumerate(tasks):
-        task_name = task["name"].replace("-", "_")
+    for i, step in enumerate(task_steps):
         code += f"    @listen('{previous_step}')\n"
-        code += f"    def execute_{task_name}(self, state):\n"
-        code += f"        \"\"\"Execute the {task['name']} task.\"\"\"\n"
-        code += f"        print(f\"Executing task: {task['name']}\")\n"
-        code += "        \n"
-        code += f"        # Run the specific task with the crew\n"
-        code += f"        result = crew.kickoff(\n"
-        code += f"            tasks=[task_{task['name']}],\n"
-        code += f"            inputs={{\n"
-        code += f"                \"query\": self.state.query,\n"
-        code += f"                \"previous_results\": self.state.results\n"
-        code += f"            }}\n"
-        code += f"        )\n"
-        code += f"        \n"
-        code += f"        # Store results in state\n"
-        code += f"        self.state.results[\"{task['name']}\"] = result\n"
-        
-        if i < len(tasks) - 1:
-            next_task = tasks[i+1]["name"]
-            code += f"        self.state.current_step = \"{next_task}\"\n"
+        code += f"    def execute_{step['safe']}(self, state):\n"
+        code += f'        """Execute the {step["raw"]} task."""\n'
+        code += f'        print("Executing task: {step["raw"]}")\n'
+        code += f"        result = crew.kickoff(inputs={{\n"
+        code += '            "query": self.state.query,\n'
+        code += '            "previous_results": self.state.results,\n'
+        code += "        })\n"
+        code += f'        self.state.results["{step["raw"]}"] = result\n'
+        if i < len(task_steps) - 1:
+            code += f'        self.state.current_step = "{task_steps[i + 1]["raw"]}"\n'
         else:
-            code += f"        self.state.current_step = \"completed\"\n"
-            
-        code += f"        return self.state\n\n"
-        previous_step = f"execute_{task_name}"
-    
-    # Add final aggregation step
+            code += '        self.state.current_step = "completed"\n'
+        code += "        return self.state\n\n"
+        previous_step = f"execute_{step['safe']}"
+
     code += f"    @listen('{previous_step}')\n"
-    code += f"    def aggregate_results(self, state):\n"
-    code += f"        \"\"\"Combine all results from tasks.\"\"\"\n"
-    code += f"        print(\"Workflow completed, aggregating results...\")\n"
-    code += f"        \n"
-    code += f"        # Combine all results\n"
-    code += f"        combined_result = \"\"\n"
-    code += f"        for task_name, result in state.results.items():\n"
-    code += f"            combined_result += f\"\\n\\n=== {task_name} ===\\n{{result}}\"\n"
-    code += f"        \n"
-    code += f"        return combined_result\n\n"
-    
-    # Add execution code
-    code += "# Run the flow\n"
-    code += "def run_workflow(query: str):\n"
-    code += "    flow = WorkflowFlow()\n"
-    code += "    flow.state.query = query\n"
-    code += "    result = flow.kickoff()\n"
-    code += "    return result\n\n"
-    
-    # Visualization function
-    code += "# Generate a visualization of the flow\n"
-    code += "def visualize_flow():\n"
-    code += "    flow = WorkflowFlow()\n"
-    code += "    flow.plot(\"workflow_flow\")\n"
-    code += "    print(\"Flow visualization saved to workflow_flow.html\")\n\n"
-    
-    code += "# Example usage\n"
-    code += "if __name__ == \"__main__\":\n"
-    code += "    result = run_workflow(\"Your query here\")\n"
-    code += "    print(result)\n"
-    
+    code += "    def aggregate_results(self, state):\n"
+    code += '        """Combine all results from tasks."""\n'
+    code += '        print("Workflow completed, aggregating results...")\n'
+    code += '        combined_result = ""\n'
+    code += "        for task_name, result in state.results.items():\n"
+    # Both placeholders must survive into the generated file. The previous version wrote
+    # this line with a single-braced {task_name} inside an f-string, so the *generator's*
+    # loop variable was substituted and every aggregated section was labelled with the
+    # last task's name instead of the current one.
+    code += '            combined_result += f"\\n\\n=== {task_name} ===\\n{result}"\n'
+    code += "        return combined_result\n\n\n"
+
+    code += '''def run_workflow(query: str):
+    """Run the flow end to end."""
+    flow = WorkflowFlow()
+    flow.state.query = query
+    return flow.kickoff()
+
+
+def visualize_flow():
+    """Write an HTML visualisation of the flow."""
+    WorkflowFlow().plot("workflow_flow")
+    print("Flow visualization saved to workflow_flow.html")
+
+
+if __name__ == "__main__":
+    print(run_workflow("Your query here"))
+'''
     return code

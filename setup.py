@@ -28,7 +28,7 @@ setup(
     description="Generate multi-agent AI teams from plain English using LiteLLM-compatible providers",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/aakriti1318/multi-agent-generator",
+    url="https://github.com/Utsav280805/Prompt2Agent",
     packages=find_packages(),
     include_package_data=True,
     install_requires=REQUIREMENTS,

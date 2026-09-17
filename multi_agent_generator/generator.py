@@ -1,68 +1,118 @@
 # multi_agent_generator/generator.py
 """
 Agent configuration generator that analyzes user requirements.
-Unified across multiple LLM providers via LiteLLM.
+Unified across multiple LLM providers via the provider registry.
 """
-import os
 import json
-import streamlit as st
+import warnings
 from typing import Dict, Any, Optional, List
-from .model_inference import ModelInference, Message
+
+from .model_inference import Message, build_inference
+from .providers import get_provider
+
+# The generator can be driven from the Streamlit UI or from the CLI/API, and it should
+# report warnings through whichever is active. The trap that produced "missing
+# ScriptRunContext!" on every CLI run was equating "streamlit is importable" with
+# "we are inside a Streamlit script run" - the former is true whenever the package is
+# merely installed. `_in_streamlit_runtime()` asks the real question instead.
+try:  # pragma: no cover - trivial import guard
+    import streamlit as st
+except Exception:  # ImportError, or Streamlit raising during import
+    st = None
+
+
+def _in_streamlit_runtime() -> bool:
+    """True only when code is executing inside an active Streamlit script run."""
+    if st is None:
+        return False
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        return get_script_run_ctx() is not None
+    except Exception:
+        # Older/newer Streamlit may move this helper; fall back to the runtime probe.
+        try:
+            from streamlit.runtime import exists
+
+            return bool(exists())
+        except Exception:
+            return False
+
+
+def _report(level: str, message: str) -> None:
+    """Surface a message through Streamlit when in the UI, else the warnings module."""
+    if _in_streamlit_runtime():
+        getattr(st, level, st.write)(message)
+    elif level == "error":
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+    else:
+        warnings.warn(message, UserWarning, stacklevel=2)
 
 
 class AgentGenerator:
     """
     Generates agent configurations based on natural language descriptions.
-    Uses LiteLLM for provider-agnostic inference.
+    Provider-agnostic: see ``multi_agent_generator.providers`` for the registry.
     """
 
-    def __init__(self, provider: str = "openai"):
+    def __init__(self, provider: str = "openai", model: Optional[str] = None):
         """
         Initialize the generator with the specified provider.
 
         Args:
-            provider: The LLM provider to use (openai, watsonx, ollama, etc.)
+            provider: The LLM provider to use (openai, huggingface,
+                huggingface-local, watsonx, ollama, anthropic, groq).
+            model: Optional explicit model id, overriding the provider default.
         """
-        self.provider = provider.lower()
-        self.model: Optional[ModelInference] = None
+        self.provider = get_provider(provider).name
+        self.model_id = model
+        self.model = None
 
-    def set_provider(self, provider: str):
+    def set_provider(self, provider: str, model: Optional[str] = None):
         """
         Change the LLM provider.
 
         Args:
-            provider: The LLM provider (openai, watsonx, ollama, etc.)
+            provider: The LLM provider to use.
+            model: Optional explicit model id, overriding the provider default.
         """
-        self.provider = provider.lower()
+        self.provider = get_provider(provider).name
+        self.model_id = model
         self.model = None  # reset for re-init
 
     def _initialize_model(self):
-        """Initialize the LiteLLM ModelInference if not already done."""
+        """
+        Build the inference backend if not already done.
+
+        Everything about *how* to reach the model - which credential satisfies this
+        provider, which route prefix the id needs, what the default model is - belongs to
+        the LLM layer and is resolved there. Two things this method used to do have been
+        removed rather than moved:
+
+        It no longer applies a route prefix. It called ``resolve_generator_model``, which
+        returns ``huggingface/Qwen/Qwen2.5-7B-Instruct``, and the layer below then stripped
+        that prefix off again before the provider class added its own. A value that is
+        transformed and untransformed on its way through two modules is a bug waiting to
+        be introduced; the plain id is passed straight through instead.
+
+        It no longer warns about a missing credential and carry on. ``validate()`` raises
+        :class:`~multi_agent_generator.errors.MissingCredentialError` - a real error with a
+        message and a suggested action - *before* any request is built. A warning that was
+        followed by a request that could not possibly succeed only moved the failure later
+        and made it less legible.
+        """
         if self.model is not None:
             return
 
-        default_models = {
-            "openai": "gpt-4o-mini",
-            "watsonx": "watsonx/meta-llama/llama-3-3-70b-instruct",
-            "ollama": "ollama/llama3.2:3b",
-        }
-        model_name = default_models.get(self.provider, self.provider)
-        model_name = os.getenv("DEFAULT_MODEL", model_name)
-
-        common_kwargs = dict(
-            model=model_name,
+        self.model = build_inference(
+            self.provider,
+            model=self.model_id,
             max_tokens=1000,
             temperature=0.7,
             top_p=0.95,
-            frequency_penalty=0,
-            presence_penalty=0,
         )
+        self.model.validate()
 
-        if self.provider == "watsonx":
-            self.model = ModelInference(**common_kwargs, project_id=os.getenv("WATSONX_PROJECT_ID"))
-        else:
-            self.model = ModelInference(**common_kwargs)
-            
     def analyze_prompt(self, user_prompt: str, framework: str) -> Dict[str, Any]:
         """
         Analyze a natural language prompt to generate agent configuration.
@@ -91,17 +141,29 @@ class AgentGenerator:
 
             if json_start >= 0 and json_end > json_start:
                 json_str = response[json_start:json_end]
-                return json.loads(json_str)
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError as exc:
+                    # Smaller open-weight models often emit *almost* valid JSON. Say so
+                    # plainly instead of silently returning the default config.
+                    _report(
+                        "warning",
+                        f"Model returned malformed JSON ({exc}). "
+                        "Using the default configuration. Try a larger model if this "
+                        "keeps happening.",
+                    )
+                    return self._get_default_config(framework)
             else:
-                if st is not None:
-                    st.warning("Could not extract valid JSON from model response. Using default configuration.")
+                _report(
+                    "warning",
+                    "Could not extract valid JSON from model response. "
+                    "Using default configuration.",
+                )
                 return self._get_default_config(framework)
 
         except Exception as e:
-            if st is not None:
-                st.error(f"Error in analyzing prompt: {e}")
+            _report("error", f"Error in analyzing prompt: {e}")
             return self._get_default_config(framework)
-
 
     def _get_system_prompt_for_framework(self, framework: str) -> str:
         """
@@ -492,17 +554,23 @@ class AgentGenerator:
                     "description": "A basic utility tool",
                     "parameters": {"input": "User input to process"}
                 }],
-                "examples": [...]
+                # Must stay JSON-serialisable: `--format json` runs json.dumps on this.
+                "examples": [{
+                    "query": "Summarise the latest AI research",
+                    "thought": "I should search for recent papers",
+                    "action": "basic_tool",
+                    "observation": "Found 3 relevant papers",
+                    "final_answer": "Here are the latest AI papers..."
+                }]
             }
         elif framework == "react-lcel":
             return {
                 "agents": [{
                     "name": "default_assistant",
-                    "role": "General A"
-                    "ssistant",
+                    "role": "General Assistant",
                     "goal": "Help with multi-step tasks",
                     "tools": ["basic_tool"],
-                    "llm": "llm"
+                    "llm": "gpt-4.1-mini"
                 }],
                 "tools": [{
                     "name": "basic_tool",

@@ -1,48 +1,182 @@
 [build-system]
-requires = ["setuptools>=42", "wheel", "setuptools_scm"]
+# setuptools>=61 is the first release that understands the [project] table below.
+# The previous floor of 42 would silently ignore all of this metadata.
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "multi-agent-generator"
-version = "1.0.0"
-description = "Generate multi-agent AI teams from plain English, supporting multiple LLM backends via LiteLLM"
+version = "2.0.0"
+description = "Turn a plain-English description into a reviewed, tested, runnable multi-agent project - with a provider-agnostic LLM layer, a sandboxed test runner, an HTTP API and a web UI"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
+
+# The core install is what the *generator* needs to run. It deliberately does not
+# include the agent frameworks: this tool writes CrewAI, LangGraph, ReAct and Agno code,
+# but it never imports those packages itself. Shipping them as hard requirements meant a
+# ~1 GB install for everyone while still, ironically, omitting `crewai` - the one
+# package the generated CrewAI code and its generated tests could not run without.
+#
+# Frameworks and provider SDKs now live in the extras below, and
+# `multi-agent-generator --check-deps` tells you exactly which to install.
+#
+# Streamlit also moved out of core. It is a bundled UI, not a dependency of generating a
+# project, and the primary interface is now the React frontend served against the API.
+# Making everyone install it to use the CLI was ~200 MB of nothing.
 dependencies = [
-    "litellm>=0.1.0",            # unified provider-agnostic client
-    "streamlit>=1.22.0",
-    "langchain>=0.3.0,<0.4.0",
-    "langchain-core>=0.3.0,<0.4.0",
-    "langchain-openai>=0.2.0,<0.4.0",
-    "langgraph>=0.2.0",
+    "litellm>=1.0.0",            # unified, provider-agnostic client
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
-    "agno==2.3.24",
 ]
 
 [project.optional-dependencies]
-# keep watsonx as opt-in if people want IBM-specific SDK
-watsonx = ["ibm-watsonx-ai>=0.2.0"]
-dev = ["pytest>=7.0.0", "black>=23.0.0", "flake8>=6.0.0", "twine", "build"]
+# --- Agent frameworks: install the one you generate code for -------------------------
+crewai = ["crewai>=0.80.0"]
+langgraph = ["langgraph>=0.2.0", "langchain-core>=0.3.0"]
+react = ["langchain>=0.3.0", "langchain-core>=0.3.0"]
+agno = ["agno>=2.0.0"]
+
+# --- LLM providers --------------------------------------------------------------------
+openai = ["langchain-openai>=0.2.0"]
+anthropic = ["langchain-anthropic>=0.2.0"]
+groq = ["langchain-groq>=0.2.0"]
+google = ["langchain-google-genai>=2.0.0"]
+ollama = ["langchain-ollama>=0.2.0"]
+watsonx = ["ibm-watsonx-ai>=0.2.0", "langchain-ibm>=0.3.0"]
+
+# Hosted Hugging Face inference. Small footprint: the model runs on HF's servers, so
+# only the Hub client and the LangChain partner package are needed locally.
+huggingface = [
+    "huggingface-hub>=0.24.0",
+    "langchain-huggingface>=0.1.0",
+]
+
+# Local Hugging Face inference. This one is genuinely heavy - torch alone is a couple of
+# gigabytes - which is exactly why it is opt-in rather than a core dependency.
+huggingface-local = [
+    "transformers>=4.40.0",
+    "torch>=2.0.0",
+    "accelerate>=0.30.0",
+    "huggingface-hub>=0.24.0",
+    "langchain-huggingface>=0.1.0",
+]
+
+# --- The web application --------------------------------------------------------------
+# Everything needed to serve the HTTP API that the React frontend talks to. `httpx` is
+# here rather than in [test] because Starlette's TestClient - which the API's own tests
+# use - is built on it.
+api = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "cryptography>=42.0.0",      # encrypts API keys saved through the settings page
+    "httpx>=0.27.0",
+]
+
+# Encrypting a saved credential at rest. Broken out so it can be installed without the
+# whole server: without it the app still runs, but saving a key through the UI is refused
+# with an explanation rather than silently falling back to plaintext storage.
+secure = ["cryptography>=42.0.0"]
+
+# The legacy bundled Streamlit UI. Kept working for anyone who relies on it, but the
+# React frontend is the supported interface now.
+streamlit = ["streamlit>=1.22.0"]
+
+# --- Testing --------------------------------------------------------------------------
+# Mirrors TEST_REQUIREMENTS in multi_agent_generator/dependencies.py, which is also what
+# generated requirements-test.txt files are rendered from. pytest-timeout is listed here
+# because generated tests carry @pytest.mark.timeout; previously nothing declared it, so
+# the mark was either inert or, under --strict-markers, a collection error.
+test = [
+    "pytest>=7.0.0",
+    "pytest-timeout>=2.1.0",
+    "langchain-core>=0.3.0",     # FakeListChatModel, the offline test double
+    "httpx>=0.27.0",             # Starlette TestClient, used by the API tests
+]
+
+dev = [
+    "multi-agent-generator[test]",
+    "multi-agent-generator[api]",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "twine",
+    "build",
+]
+
+# Everything, for when you would rather not think about it.
+all = [
+    "multi-agent-generator[crewai]",
+    "multi-agent-generator[langgraph]",
+    "multi-agent-generator[react]",
+    "multi-agent-generator[agno]",
+    "multi-agent-generator[openai]",
+    "multi-agent-generator[anthropic]",
+    "multi-agent-generator[groq]",
+    "multi-agent-generator[google]",
+    "multi-agent-generator[ollama]",
+    "multi-agent-generator[watsonx]",
+    "multi-agent-generator[huggingface]",
+    "multi-agent-generator[api]",
+    "multi-agent-generator[test]",
+]
+
+# All frameworks and the two Hugging Face paths, but no proprietary provider SDKs.
+open-source = [
+    "multi-agent-generator[crewai]",
+    "multi-agent-generator[langgraph]",
+    "multi-agent-generator[react]",
+    "multi-agent-generator[agno]",
+    "multi-agent-generator[huggingface]",
+    "multi-agent-generator[ollama]",
+    "multi-agent-generator[test]",
+]
 
 [project.urls]
-"Homepage" = "https://github.com/aakriti1318/multi-agent-generator"
-"Bug Tracker" = "https://github.com/aakriti1318/multi-agent-generator/issues"
+"Homepage" = "https://github.com/Utsav280805/Prompt2Agent"
+"Bug Tracker" = "https://github.com/Utsav280805/Prompt2Agent/issues"
 
 [project.scripts]
 multi-agent-generator = "multi_agent_generator.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["multi_agent_generator*"]
+# `backend` ships too: `multi-agent-generator --serve` imports backend.app, so leaving it
+# out would make the web application work from a git checkout and fail from a wheel - the
+# worst kind of packaging bug, because it never shows up in development.
+include = ["multi_agent_generator*", "backend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Markers are registered here so this project's own suite, and any generated suite run
+# from the repo root, collect cleanly under --strict-markers.
+markers = [
+    "contract: validates an agent configuration; needs no framework packages",
+    "unit: pure logic, no I/O, no subprocess, no network",
+    "integration: crosses a real boundary - the filesystem, SQLite, or a subprocess",
+    "end_to_end: runs the full workflow",
+    "performance: measures timing and memory",
+    "reliability: checks error handling",
+    "quality: scores output quality",
+    "live: requires real credentials and network access",
+    "slow: takes more than a few seconds",
+]
+# Two things are load-bearing here.
+#
+# `-m 'not live'` keeps credential-requiring tests opt-in (`pytest -m live`), because they
+# cost money and cannot run in CI.
+#
+# `--timeout` is the backstop for the class of bug this project shipped once already: a
+# test that reached for a real model and hung until the caller gave up. A per-test wall
+# clock turns "the suite never finishes" into a named failing test, which is a bug report
+# instead of a mystery. It is a *safety net*, not a fix - the offline test doubles are what
+# make the suite fast; this is what makes a regression visible.
+addopts = "--strict-markers -m 'not live' --timeout=60"

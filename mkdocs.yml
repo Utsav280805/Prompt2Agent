@@ -1,8 +1,8 @@
 site_name: Multi-Agent Generator
 site_description: "Generate multi-agent AI workflows from plain English using CrewAI, LangGraph, Agno, and ReAct. Powered by LiteLLM."
-site_url: https://aakriti1318.github.io/multi-agent-generator/
-repo_url: https://github.com/aakriti1318/multi-agent-generator
-repo_name: aakriti1318/multi-agent-generator
+site_url: https://Utsav280805.github.io/Prompt2Agent/
+repo_url: https://github.com/Utsav280805/Prompt2Agent
+repo_name: Utsav280805/Prompt2Agent
 
 theme:
   name: material
